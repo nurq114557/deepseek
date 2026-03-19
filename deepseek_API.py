@@ -10,6 +10,13 @@ st.set_page_config(
     layout="wide"
 )
 
+# ========== 安全获取密钥 ==========
+def get_default_api_key():
+    try:
+        return st.secrets.get("DEEPSEEK_API_KEY", "")
+    except Exception:
+        return ""
+
 # ========== 侧边栏设置 ==========
 with st.sidebar:
     st.title("⚙️ 设置")
@@ -18,7 +25,7 @@ with st.sidebar:
     api_key = st.text_input(
         "DeepSeek API密钥",
         type="password",
-        value=st.secrets.get("DEEPSEEK_API_KEY", "") if hasattr(st, 'secrets') else "",
+        value=get_default_api_key(),
         help="从DeepSeek官网获取API密钥"
     )
 
@@ -36,14 +43,12 @@ with st.sidebar:
 
     # 高级参数
     st.subheader("高级参数")
-    temperature = st.slider("温度", 0.0, 2.0, 0.7, 0.1,
-                          help="值越高回答越随机，值越低回答越确定")
+    temperature = st.slider("温度", 0.0, 2.0, 0.7, 0.1, help="值越高回答越随机，值越低回答越确定")
     max_tokens = st.slider("最大生成长度", 100, 4096, 2048, 100)
 
     # 上下文管理
     st.subheader("上下文管理")
-    max_history = st.number_input("最大对话轮数", 1, 50, 10,
-                                 help="限制对话历史长度以控制token消耗")
+    max_history = st.number_input("最大对话轮数", 1, 50, 10, help="限制对话历史长度以控制token消耗")
 
     # 控制按钮
     col1, col2 = st.columns(2)
@@ -98,95 +103,76 @@ for i, msg in enumerate(st.session_state.messages):
     if msg["role"] != "system":
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
-
             # 显示思考过程（如果有）
             if msg.get("reasoning"):
                 with st.expander("🤔 思考过程", expanded=False):
                     st.markdown(msg["reasoning"])
 
 # ========== 处理用户输入 ==========
-def process_user_input(user_input: str):
-    """处理用户输入的安全过滤"""
-    # 基本的输入过滤
-    if not user_input or user_input.strip() == "":
+def process_user_input(user_input_text: str):
+    if not user_input_text or user_input_text.strip() == "":
         return None
-
-    # 防止超长输入
-    if len(user_input) > 2000:
+    if len(user_input_text) > 2000:
         st.warning("输入过长，请控制在2000字符以内")
         return None
+    return user_input_text.replace("<", "&lt;").replace(">", "&gt;")
 
-    # 替换可能的危险字符
-    safe_input = user_input.replace("<", "&lt;").replace(">", "&gt;")
-    return safe_input
-
-# 输入框
 user_input = st.chat_input("请输入您的问题...")
 
 if user_input:
-    # 输入处理
     processed_input = process_user_input(user_input)
     if not processed_input:
         st.stop()
 
-    # 显示用户消息
     with st.chat_message("user"):
         st.markdown(processed_input)
 
-    # 添加到历史（限制历史长度）
     st.session_state.messages.append({"role": "user", "content": processed_input})
 
-    # 上下文截断（防止token溢出）
-    if len(st.session_state.messages) > max_history * 2:  # 乘以2因为包含user和assistant
-        # 保留系统消息和最近对话
-        st.session_state.messages = [
-            st.session_state.messages[0]
-        ] + st.session_state.messages[-(max_history * 2):]
+    if len(st.session_state.messages) > max_history * 2:
+        st.session_state.messages = [st.session_state.messages[0]] + st.session_state.messages[-(max_history * 2):]
 
-    # 显示助手回复
-与st.chat_message(“assistant"):
+    with st.chat_message("assistant"):
         message_placeholder = st.empty()
         message_placeholder.markdown("⏳ 思考中...")
 
         try:
-            # 发送请求
+            # 【关键修复】：剥离无用字段，只传递 role 和 content 给 API
+            api_messages = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
+            
             response = client.chat.completions.create(
                 model=model_options[selected_model],
-                messages=st.session_state.messages,
+                messages=api_messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 stream=False
             )
 
-            # 提取响应
             reasoning = getattr(response.choices[0].message, 'reasoning_content', None)
             reply = response.choices[0].message.content
 
-            # 如果有思考过程
-如果推理:
+            if reasoning:
                 with st.expander("🧠 深度思考", expanded=False):
                     st.markdown(reasoning)
 
-            # 显示回复
-message_placeholder.减价(回复)
+            message_placeholder.markdown(reply)
 
-            # 显示token使用信息
-Token_info = {
+            token_info = {
                 "提示词": response.usage.prompt_tokens,
                 "生成": response.usage.completion_tokens,
-"总计": response.usage.total_tokens
+                "总计": response.usage.total_tokens
             }
-st.caption(f"Token用量: {token_info['总计']} (提示词: {token_info['提示词']}, 生成: {token_info['生成']})")
+            st.caption(f"Token用量: {token_info['总计']} (提示词: {token_info['提示词']}, 生成: {token_info['生成']})")
 
-            # 保存到历史（包含思考过程）
-助教_msg = {
-"role": "assistant",
-“content":回复,
-“model": selected_model,
-"tokens": token_info["总计"],
-"timestamp": datetime.now().isoformat()
+            # 存入完整的本地记录（包含UI所需的额外字段，这些字段在下一次请求时会被上方清洗掉）
+            assistant_msg = {
+                "role": "assistant", 
+                "content": reply,
+                "model": selected_model,
+                "tokens": token_info["总计"],
+                "timestamp": datetime.now().isoformat()
             }
-如果推理:
+            if reasoning:
                 assistant_msg["reasoning"] = reasoning
 
             st.session_state.messages.append(assistant_msg)
@@ -195,26 +181,24 @@ st.caption(f"Token用量: {token_info['总计']} (提示词: {token_info['提示
             error_msg = f"请求失败: {str(e)}"
             message_placeholder.error(error_msg)
 
-            # 如果是token超限错误
             if "context length" in str(e).lower() or "token" in str(e).lower():
                 st.info("💡 提示：对话历史过长，已自动清理较早的记录")
-                # 清理部分历史
                 st.session_state.messages = [
                     st.session_state.messages[0],
-                    st.session_state.messages[-2],  # 用户上一条消息
+                    st.session_state.messages[-2],
                     {"role": "assistant", "content": "由于上下文长度限制，已清理较早对话历史。请继续提问。"}
                 ]
                 st.rerun()
 
 # ========== 底部信息 ==========
 st.divider()
-Col1, col2, col3 = st.columns(3)
+col1, col2, col3 = st.columns(3)
 with col1:
-{len([m 为 m 在 st.session_state.]如果m['role'] ！= '系统'])}“)
-col2:
-如果st.session_state。消息和len(st.session_state。留言)> 1：
-Last_msg = st.session_state.消息[-1]
-如果last_msg.get (" model"):
-st.caption(f"🔧 当前模型: {last_msg['model']}")
-col3:
-. title （"；由DeepSeek api提供支持"；）
+    st.caption(f"💬 对话轮数: {len([m for m in st.session_state.messages if m['role'] != 'system'])}")
+with col2:
+    if st.session_state.messages and len(st.session_state.messages) > 1:
+        last_msg = st.session_state.messages[-1]
+        if last_msg.get("model"):
+            st.caption(f"🔧 当前模型: {last_msg['model']}")
+with col3:
+    st.caption("Powered by DeepSeek API")

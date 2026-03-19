@@ -132,54 +132,102 @@ if user_input:
     if len(st.session_state.messages) > max_history * 2:
         st.session_state.messages = [st.session_state.messages[0]] + st.session_state.messages[-(max_history * 2):]
 
+    # ========== 显示助手回复（关键升级：启用流式传输） ==========
     with st.chat_message("assistant"):
-        message_placeholder = st.empty()
-        message_placeholder.markdown("⏳ 思考中...")
+        # 【关键修改】：创建占位符以实现流式输出
+
+        # 1. 用于打字机效果内容的占位符（用户目前看到“🤔 思考中...”的地方）
+        content_placeholder = st.empty()
+        # 2. 用于流式显示思考过程的占位符，默认展开
+        streaming_reasoning_placeholder = st.empty()
+        
+        full_content = ""      # 存储完整的回复内容
+        full_reasoning = ""    # 存储完整的思考过程
+        final_usage = None     # 存储最终的 token 使用情况
+        
+        # 显示初始状态
+        content_placeholder.markdown("⏳ 正在建立连接...")
 
         try:
-            # 【关键修复】：剥离无用字段，只传递 role 和 content 给 API
+            # 清洗API消息（只传递 role 和 content，保持不变）
             api_messages = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
             
-            response = client.chat.completions.create(
+            # 【关键修改】：将 stream 参数设为 True
+            response_stream = client.chat.completions.create(
                 model=model_options[selected_model],
                 messages=api_messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                stream=False
+                stream=True  # 启用流式传输
             )
 
-            reasoning = getattr(response.choices[0].message, 'reasoning_content', None)
-            reply = response.choices[0].message.content
+            # 遍历响应流
+            for chunk in response_stream:
+                # 获取推理内容（Reasoning Content - R1特有）
+                reasoning_chunk = getattr(chunk.choices[0].delta, 'reasoning_content', None)
+                # 获取正式回复内容
+                content_chunk = getattr(chunk.choices[0].delta, 'content', None)
+                
+                # 捕获 Token 使用情况（通常在最后一个块中）
+                usage_chunk = getattr(chunk, 'usage', None)
+                if usage_chunk:
+                    final_usage = usage_chunk
+                
+                # 1. 处理推理内容流（对于R1模型）
+                if reasoning_chunk:
+                    # R1模式下，一旦开始输出思考，移除内容占位符，保持页面整洁
+                    content_placeholder.empty()
+                    full_reasoning += reasoning_chunk
+                    with streaming_reasoning_placeholder.expander("🧠 深度思考中...", expanded=True):
+                        st.markdown(full_reasoning + "▌") # 添加光标
 
-            if reasoning:
-                with st.expander("🧠 深度思考", expanded=False):
-                    st.markdown(reasoning)
+                # 2. 处理正式内容流
+                if content_chunk:
+                    # 内容开始生成，移除临时的流式思考占位符，避免干扰
+                    streaming_reasoning_placeholder.empty()
+                    
+                    full_content += content_chunk
+                    # 使用打字机效果更新内容区域
+                    content_placeholder.markdown(full_content + "▌")
 
-            message_placeholder.markdown(reply)
+            # ========== 生成结束后的最终渲染 ==========
+            
+            # 移除内容的光标
+            content_placeholder.markdown(full_content)
+            
+            # 处理 R1 的思考过程：将其从临时的流式占位符移入最终折叠的可扩展器中
+            if full_reasoning:
+                # 确保临时思考区域已清空
+                streaming_reasoning_placeholder.empty()
+                # 在最终位置放置一个折叠的可扩展器，保持界面整洁
+                with st.expander("🤔 深度思考（点击展开）", expanded=False):
+                    st.markdown(full_reasoning)
 
-            token_info = {
-                "提示词": response.usage.prompt_tokens,
-                "生成": response.usage.completion_tokens,
-                "总计": response.usage.total_tokens
-            }
-            st.caption(f"Token用量: {token_info['总计']} (提示词: {token_info['提示词']}, 生成: {token_info['生成']})")
+            # 处理 Token 用量信息：流式传输后从最终响应中捕获
+            if final_usage:
+                token_info = {
+                    "提示词": final_usage.prompt_tokens,
+                    "生成": final_usage.completion_tokens,
+                    "总计": final_usage.total_tokens
+                }
+                st.caption(f"Token用量: {token_info['总计']} (提示词: {token_info['提示词']}, 生成: {token_info['生成']})")
 
-            # 存入完整的本地记录（包含UI所需的额外字段，这些字段在下一次请求时会被上方清洗掉）
+            # 保存到历史（包含完整的回复、思考过程和 token 信息）
             assistant_msg = {
                 "role": "assistant", 
-                "content": reply,
+                "content": full_content,
                 "model": selected_model,
-                "tokens": token_info["总计"],
+                "tokens": final_usage.total_tokens if final_usage else None,
                 "timestamp": datetime.now().isoformat()
             }
-            if reasoning:
-                assistant_msg["reasoning"] = reasoning
+            if full_reasoning:
+                assistant_msg["reasoning"] = full_reasoning
 
             st.session_state.messages.append(assistant_msg)
 
         except Exception as e:
             error_msg = f"请求失败: {str(e)}"
-            message_placeholder.error(error_msg)
+            content_placeholder.error(error_msg)
 
             if "context length" in str(e).lower() or "token" in str(e).lower():
                 st.info("💡 提示：对话历史过长，已自动清理较早的记录")
